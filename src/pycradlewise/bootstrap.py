@@ -32,9 +32,18 @@ APKPURE_HEADERS = {
 CONFIG_PATH_IN_APK = "res/raw/amplifyconfiguration.json"
 CACHE_FILENAME = "cradlewise_app_config.json"
 
+# Bump this to force cache invalidation when the config schema changes
+# or when the extracted values are known to have changed.
+CONFIG_CACHE_VERSION = 2
+
 # Expected signing certificate SHA-256 (Chigroo Labs / Cradlewise)
 EXPECTED_CERT_SHA256 = (
     "79748B19F8761FA82829E33170AF58B7EEC4942689737B4E54B3EF0C60E546E5"
+)
+
+
+IOT_ENDPOINT_PATTERN = re.compile(
+    rb"([a-z0-9]+-ats\.iot\.[a-z0-9-]+\.amazonaws\.com)"
 )
 
 
@@ -48,15 +57,18 @@ class AppConfig:
     cognito_identity_pool_id: str
     cognito_region: str
     api_base_url: str
+    iot_endpoint: str | None = None
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, str | int | None]:
         return {
+            "_cache_version": CONFIG_CACHE_VERSION,
             "cognito_user_pool_id": self.cognito_user_pool_id,
             "cognito_app_client_id": self.cognito_app_client_id,
             "cognito_app_client_secret": self.cognito_app_client_secret,
             "cognito_identity_pool_id": self.cognito_identity_pool_id,
             "cognito_region": self.cognito_region,
             "api_base_url": self.api_base_url,
+            "iot_endpoint": self.iot_endpoint,
         }
 
     @classmethod
@@ -68,10 +80,13 @@ class AppConfig:
             cognito_identity_pool_id=data["cognito_identity_pool_id"],
             cognito_region=data["cognito_region"],
             api_base_url=data["api_base_url"],
+            iot_endpoint=data.get("iot_endpoint"),
         )
 
     @classmethod
-    def from_amplify_json(cls, raw: dict[str, Any]) -> AppConfig:
+    def from_amplify_json(
+        cls, raw: dict[str, Any], iot_endpoint: str | None = None
+    ) -> AppConfig:
         """Parse the amplifyconfiguration.json format."""
         auth_plugin = raw["auth"]["plugins"]["awsCognitoAuthPlugin"]
         pool = auth_plugin["CognitoUserPool"]["Default"]
@@ -85,15 +100,19 @@ class AppConfig:
             cognito_identity_pool_id=identity["PoolId"],
             cognito_region=pool["Region"],
             api_base_url=api["endpoint"],
+            iot_endpoint=iot_endpoint,
         )
 
 
-async def get_app_config(cache_dir: Path | None = None) -> AppConfig:
+async def get_app_config(
+    cache_dir: Path | None = None, *, force_refresh: bool = False
+) -> AppConfig:
     """Get the Cradlewise app config, using cache if available.
 
     Args:
         cache_dir: Directory to cache the extracted config. If None,
                    defaults to ~/.pycradlewise/
+        force_refresh: If True, bypass the cache and re-download from APK.
 
     Returns:
         AppConfig with all Cognito and API settings.
@@ -103,13 +122,20 @@ async def get_app_config(cache_dir: Path | None = None) -> AppConfig:
 
     cache_file = cache_dir / CACHE_FILENAME
 
-    # Try cache first
-    if cache_file.exists():
+    # Try cache first (unless forced refresh)
+    if not force_refresh and cache_file.exists():
         try:
             data = json.loads(cache_file.read_text())
-            config = AppConfig.from_dict(data)
-            _LOGGER.debug("Loaded app config from cache")
-            return config
+            cached_version = data.get("_cache_version", 0)
+            if cached_version < CONFIG_CACHE_VERSION:
+                _LOGGER.info(
+                    "Cache version %s < %s, re-downloading",
+                    cached_version, CONFIG_CACHE_VERSION,
+                )
+            else:
+                config = AppConfig.from_dict(data)
+                _LOGGER.debug("Loaded app config from cache (version %s)", cached_version)
+                return config
         except (json.JSONDecodeError, KeyError):
             _LOGGER.warning("Cached config is invalid, re-downloading")
 
@@ -122,6 +148,15 @@ async def get_app_config(cache_dir: Path | None = None) -> AppConfig:
     _LOGGER.info("App config extracted and cached to %s", cache_file)
 
     return config
+
+
+async def refresh_app_config(cache_dir: Path | None = None) -> AppConfig:
+    """Force re-download the app config from the latest APK.
+
+    Use this when the extracted config values may have changed
+    (e.g., after a Cradlewise app update).
+    """
+    return await get_app_config(cache_dir=cache_dir, force_refresh=True)
 
 
 async def _extract_config_from_apk() -> AppConfig:
@@ -146,7 +181,7 @@ async def _extract_config_from_apk() -> AppConfig:
         "Downloaded %.1f MB, extracting config...", len(xapk_bytes) / 1024 / 1024
     )
 
-    # Step 3: XAPK (zip) -> base APK (zip) -> amplifyconfiguration.json
+    # Step 3: XAPK (zip) -> base APK (zip) -> amplifyconfiguration.json + IoT endpoint
     with zipfile.ZipFile(io.BytesIO(xapk_bytes)) as xapk:
         base_apk_names = [
             n
@@ -165,7 +200,29 @@ async def _extract_config_from_apk() -> AppConfig:
             )
         raw_config = json.loads(apk.read(CONFIG_PATH_IN_APK))
 
-    return AppConfig.from_amplify_json(raw_config)
+        # Extract the AWS IoT endpoint from DEX bytecode
+        iot_endpoint = _extract_iot_endpoint(apk)
+
+    return AppConfig.from_amplify_json(raw_config, iot_endpoint=iot_endpoint)
+
+
+def _extract_iot_endpoint(apk: zipfile.ZipFile) -> str | None:
+    """Extract the AWS IoT endpoint from DEX files in the APK.
+
+    The Cradlewise app stores the IoT endpoint as a string constant
+    (REMOTE_MQTT_CUSTOMER_SPECIFIC_ENDPOINT) in compiled Kotlin code.
+    We search DEX bytecode for the ATS endpoint pattern.
+    """
+    for name in apk.namelist():
+        if name.endswith(".dex"):
+            dex_bytes = apk.read(name)
+            match = IOT_ENDPOINT_PATTERN.search(dex_bytes)
+            if match:
+                endpoint = match.group(1).decode("ascii")
+                _LOGGER.debug("Found IoT endpoint in %s: %s", name, endpoint)
+                return endpoint
+    _LOGGER.warning("IoT endpoint not found in APK DEX files")
+    return None
 
 
 async def _get_download_url() -> str:

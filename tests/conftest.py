@@ -15,6 +15,7 @@ def app_config():
         cognito_identity_pool_id="us-east-1:test-identity-pool",
         cognito_region="us-east-1",
         api_base_url="https://backend.test.com/prod",
+        iot_endpoint="test-endpoint-ats.iot.us-east-1.amazonaws.com",
     )
 
 

@@ -8,8 +8,6 @@ import logging
 from collections.abc import Callable
 from uuid import uuid4
 
-import boto3
-
 _DEFAULT_REGION = "us-east-1"
 
 _LOGGER = logging.getLogger(__name__)
@@ -21,21 +19,6 @@ try:
     from awsiot import mqtt_connection_builder
 except ImportError:
     MQTT_AVAILABLE = False
-
-
-def _discover_iot_endpoint(
-    access_key: str, secret_key: str, session_token: str, region: str
-) -> str:
-    """Discover the AWS IoT Core endpoint using DescribeEndpoint API."""
-    client = boto3.client(
-        "iot",
-        region_name=region,
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        aws_session_token=session_token,
-    )
-    response = client.describe_endpoint(endpointType="iot:Data-ATS")
-    return response["endpointAddress"]
 
 
 class CradlewiseMqtt:
@@ -59,6 +42,7 @@ class CradlewiseMqtt:
         cradle_ids: list[str],
         on_state_update: Callable[[str, dict], None],
         region: str = _DEFAULT_REGION,
+        iot_endpoint: str | None = None,
     ) -> None:
         """Connect to AWS IoT and subscribe to cradle state topics."""
         if not MQTT_AVAILABLE:
@@ -70,12 +54,13 @@ class CradlewiseMqtt:
         self._loop = asyncio.get_running_loop()
 
         try:
-            # Discover the IoT endpoint for this AWS account
+            if iot_endpoint:
+                self._endpoint = iot_endpoint
             if not self._endpoint:
-                self._endpoint = await asyncio.to_thread(
-                    _discover_iot_endpoint, access_key, secret_key, session_token, region
+                _LOGGER.warning(
+                    "No IoT endpoint provided — MQTT unavailable"
                 )
-                _LOGGER.debug("Discovered IoT endpoint: %s", self._endpoint)
+                return
 
             self._connection = await asyncio.to_thread(
                 self._build_connection, access_key, secret_key, session_token, region
@@ -176,8 +161,10 @@ class CradlewiseMqtt:
         cradle_ids: list[str],
         on_state_update: Callable[[str, dict], None],
         region: str = _DEFAULT_REGION,
+        iot_endpoint: str | None = None,
     ) -> None:
         await self.disconnect()
         await self.connect(
-            access_key, secret_key, session_token, cradle_ids, on_state_update, region
+            access_key, secret_key, session_token, cradle_ids, on_state_update,
+            region, iot_endpoint=iot_endpoint,
         )

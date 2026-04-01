@@ -11,7 +11,9 @@ from aioresponses import aioresponses
 
 from pycradlewise.bootstrap import (
     AppConfig,
+    CONFIG_CACHE_VERSION,
     get_app_config,
+    refresh_app_config,
     _extract_config_from_apk,
     _get_download_url,
     APKPURE_API,
@@ -29,6 +31,14 @@ class TestAppConfig:
         assert config.cognito_identity_pool_id == "us-east-1:test-identity-pool-id"
         assert config.cognito_region == "us-east-1"
         assert config.api_base_url == "https://backend.test.com/prod-latest"
+        assert config.iot_endpoint is None
+
+    def test_from_amplify_json_with_iot_endpoint(self):
+        config = AppConfig.from_amplify_json(
+            AMPLIFY_CONFIG_JSON,
+            iot_endpoint="abc123-ats.iot.us-east-1.amazonaws.com",
+        )
+        assert config.iot_endpoint == "abc123-ats.iot.us-east-1.amazonaws.com"
 
     def test_to_dict_roundtrip(self):
         original = AppConfig(
@@ -38,6 +48,7 @@ class TestAppConfig:
             cognito_identity_pool_id="identity",
             cognito_region="us-west-2",
             api_base_url="https://api.test.com",
+            iot_endpoint="test-ats.iot.us-west-2.amazonaws.com",
         )
         data = original.to_dict()
         restored = AppConfig.from_dict(data)
@@ -47,21 +58,31 @@ class TestAppConfig:
         config = AppConfig.from_amplify_json(AMPLIFY_CONFIG_JSON)
         d = config.to_dict()
         assert set(d.keys()) == {
+            "_cache_version",
             "cognito_user_pool_id",
             "cognito_app_client_id",
             "cognito_app_client_secret",
             "cognito_identity_pool_id",
             "cognito_region",
             "api_base_url",
+            "iot_endpoint",
         }
 
 
-def _make_xapk_bytes(amplify_config: dict) -> bytes:
+FAKE_IOT_ENDPOINT = "a2bby18test-ats.iot.us-east-1.amazonaws.com"
+
+
+def _make_xapk_bytes(
+    amplify_config: dict, iot_endpoint: str = FAKE_IOT_ENDPOINT
+) -> bytes:
     """Build a fake XAPK containing a base APK with the given amplify config."""
+    # Embed the IoT endpoint in a fake DEX file (simulates compiled Kotlin constant)
+    dex_content = b"\x00\x00" + iot_endpoint.encode("ascii") + b"\x00\x00"
+
     apk_buf = io.BytesIO()
     with zipfile.ZipFile(apk_buf, "w") as apk_zip:
         apk_zip.writestr("res/raw/amplifyconfiguration.json", json.dumps(amplify_config))
-        apk_zip.writestr("classes.dex", b"fake")
+        apk_zip.writestr("classes.dex", dex_content)
     apk_bytes = apk_buf.getvalue()
 
     xapk_buf = io.BytesIO()
@@ -75,18 +96,45 @@ class TestGetAppConfig:
     @pytest.mark.asyncio
     async def test_returns_cached(self, tmp_path):
         cache_data = {
+            "_cache_version": CONFIG_CACHE_VERSION,
             "cognito_user_pool_id": "cached-pool",
             "cognito_app_client_id": "cached-client",
             "cognito_app_client_secret": "cached-secret",
             "cognito_identity_pool_id": "cached-identity",
             "cognito_region": "us-east-1",
             "api_base_url": "https://cached.api.com",
+            "iot_endpoint": "cached-ats.iot.us-east-1.amazonaws.com",
         }
         cache_file = tmp_path / "cradlewise_app_config.json"
         cache_file.write_text(json.dumps(cache_data))
 
         config = await get_app_config(cache_dir=tmp_path)
         assert config.cognito_user_pool_id == "cached-pool"
+        assert config.iot_endpoint == "cached-ats.iot.us-east-1.amazonaws.com"
+
+    @pytest.mark.asyncio
+    async def test_stale_cache_version_triggers_redownload(self, tmp_path):
+        cache_data = {
+            "_cache_version": 0,
+            "cognito_user_pool_id": "old-pool",
+            "cognito_app_client_id": "old-client",
+            "cognito_app_client_secret": "old-secret",
+            "cognito_identity_pool_id": "old-identity",
+            "cognito_region": "us-east-1",
+            "api_base_url": "https://old.api.com",
+        }
+        cache_file = tmp_path / "cradlewise_app_config.json"
+        cache_file.write_text(json.dumps(cache_data))
+
+        with patch("pycradlewise.bootstrap._extract_config_from_apk") as mock_extract:
+            mock_extract.return_value = AppConfig.from_amplify_json(
+                AMPLIFY_CONFIG_JSON,
+                iot_endpoint=FAKE_IOT_ENDPOINT,
+            )
+            config = await get_app_config(cache_dir=tmp_path)
+
+        assert config.cognito_user_pool_id == "us-east-1_testUserPool"
+        assert config.iot_endpoint == FAKE_IOT_ENDPOINT
 
     @pytest.mark.asyncio
     async def test_invalid_cache_triggers_download(self, tmp_path):
@@ -113,6 +161,33 @@ class TestGetAppConfig:
         assert cache_dir.exists()
         assert (cache_dir / "cradlewise_app_config.json").exists()
 
+    @pytest.mark.asyncio
+    async def test_force_refresh_bypasses_cache(self, tmp_path):
+        cache_data = {
+            "_cache_version": CONFIG_CACHE_VERSION,
+            "cognito_user_pool_id": "cached-pool",
+            "cognito_app_client_id": "cached-client",
+            "cognito_app_client_secret": "cached-secret",
+            "cognito_identity_pool_id": "cached-identity",
+            "cognito_region": "us-east-1",
+            "api_base_url": "https://cached.api.com",
+            "iot_endpoint": "cached-ats.iot.us-east-1.amazonaws.com",
+        }
+        cache_file = tmp_path / "cradlewise_app_config.json"
+        cache_file.write_text(json.dumps(cache_data))
+
+        with patch("pycradlewise.bootstrap._extract_config_from_apk") as mock_extract:
+            mock_extract.return_value = AppConfig.from_amplify_json(
+                AMPLIFY_CONFIG_JSON,
+                iot_endpoint=FAKE_IOT_ENDPOINT,
+            )
+            config = await refresh_app_config(cache_dir=tmp_path)
+
+        # Should have downloaded fresh, not used cache
+        mock_extract.assert_called_once()
+        assert config.cognito_user_pool_id == "us-east-1_testUserPool"
+        assert config.iot_endpoint == FAKE_IOT_ENDPOINT
+
 
 class TestExtractConfig:
     @pytest.mark.asyncio
@@ -127,6 +202,7 @@ class TestExtractConfig:
 
         assert config.cognito_user_pool_id == "us-east-1_testUserPool"
         assert config.api_base_url == "https://backend.test.com/prod-latest"
+        assert config.iot_endpoint == FAKE_IOT_ENDPOINT
 
     @pytest.mark.asyncio
     async def test_raises_on_missing_base_apk(self):

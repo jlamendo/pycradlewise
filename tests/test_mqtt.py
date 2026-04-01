@@ -25,6 +25,13 @@ class TestCradlewiseMqtt:
 
     @pytest.mark.asyncio
     @pytest.mark.skipif(not MQTT_AVAILABLE, reason="awsiotsdk not installed")
+    async def test_connect_without_endpoint(self):
+        mqtt = CradlewiseMqtt()
+        await mqtt.connect("ak", "sk", "token", ["c1"], lambda cid, state: None)
+        assert mqtt._connected is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(not MQTT_AVAILABLE, reason="awsiotsdk not installed")
     async def test_connect_success(self):
         mqtt = CradlewiseMqtt()
 
@@ -35,9 +42,11 @@ class TestCradlewiseMqtt:
         mock_connection.subscribe.return_value = (mock_future, 1)
         mock_connection.publish.return_value = (mock_future, 1)
 
-        with patch.object(mqtt, "_build_connection", return_value=mock_connection), \
-             patch("pycradlewise.mqtt._discover_iot_endpoint", return_value="test-endpoint.iot.us-east-1.amazonaws.com"):
-            await mqtt.connect("ak", "sk", "token", ["cradle-1"], lambda cid, state: None)
+        with patch.object(mqtt, "_build_connection", return_value=mock_connection):
+            await mqtt.connect(
+                "ak", "sk", "token", ["cradle-1"], lambda cid, state: None,
+                iot_endpoint="test-endpoint.iot.us-east-1.amazonaws.com",
+            )
 
         assert mqtt._connected is True
         assert mqtt.available is True
@@ -57,7 +66,10 @@ class TestCradlewiseMqtt:
         mock_connection.connect.return_value = mock_future
 
         with patch.object(mqtt, "_build_connection", return_value=mock_connection):
-            await mqtt.connect("ak", "sk", "token", ["c1"], lambda cid, state: None)
+            await mqtt.connect(
+                "ak", "sk", "token", ["c1"], lambda cid, state: None,
+                iot_endpoint="test-endpoint.iot.us-east-1.amazonaws.com",
+            )
 
         assert mqtt._connected is False
         assert mqtt.available is False
@@ -96,9 +108,11 @@ class TestCradlewiseMqtt:
         mock_connection.publish.return_value = (mock_future, 1)
         mqtt._connection = mock_connection
 
-        with patch.object(mqtt, "_build_connection", return_value=mock_connection), \
-             patch("pycradlewise.mqtt._discover_iot_endpoint", return_value="test-endpoint.iot.us-east-1.amazonaws.com"):
-            await mqtt.reconnect("ak", "sk", "token", ["c1"], lambda cid, state: None)
+        with patch.object(mqtt, "_build_connection", return_value=mock_connection):
+            await mqtt.reconnect(
+                "ak", "sk", "token", ["c1"], lambda cid, state: None,
+                iot_endpoint="test-endpoint.iot.us-east-1.amazonaws.com",
+            )
 
         mock_connection.disconnect.assert_called_once()
         assert mqtt._connected is True
