@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pycradlewise"
-version = "0.3.0"
+version = "0.3.1"
 description = "Async Python client for the Cradlewise Smart Crib API"
 readme = "README.md"
 license = {text = "MIT"}
