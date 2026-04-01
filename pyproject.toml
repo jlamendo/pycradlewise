@@ -32,9 +32,9 @@ dependencies = [
 dev = ["pytest", "pytest-asyncio", "aioresponses"]
 
 [project.urls]
-Homepage = "https://github.com/jlamendola/pycradlewise"
-Repository = "https://github.com/jlamendola/pycradlewise"
-Issues = "https://github.com/jlamendola/pycradlewise/issues"
+Homepage = "https://github.com/jlamendo/pycradlewise"
+Repository = "https://github.com/jlamendo/pycradlewise"
+Issues = "https://github.com/jlamendo/pycradlewise/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
