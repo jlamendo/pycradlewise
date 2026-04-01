@@ -7,6 +7,7 @@ The config is cached to disk so the download only happens once.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -123,9 +124,10 @@ async def get_app_config(
     cache_file = cache_dir / CACHE_FILENAME
 
     # Try cache first (unless forced refresh)
-    if not force_refresh and cache_file.exists():
+    if not force_refresh and await asyncio.to_thread(cache_file.exists):
         try:
-            data = json.loads(cache_file.read_text())
+            text = await asyncio.to_thread(cache_file.read_text)
+            data = json.loads(text)
             cached_version = data.get("_cache_version", 0)
             if cached_version < CONFIG_CACHE_VERSION:
                 _LOGGER.info(
@@ -143,8 +145,10 @@ async def get_app_config(
     config = await _extract_config_from_apk()
 
     # Cache for next time
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_file.write_text(json.dumps(config.to_dict(), indent=2))
+    await asyncio.to_thread(cache_dir.mkdir, parents=True, exist_ok=True)
+    await asyncio.to_thread(
+        cache_file.write_text, json.dumps(config.to_dict(), indent=2)
+    )
     _LOGGER.info("App config extracted and cached to %s", cache_file)
 
     return config
