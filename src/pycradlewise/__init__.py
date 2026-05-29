@@ -5,7 +5,6 @@ from .bootstrap import AppConfig, get_app_config, refresh_app_config
 from .client import CradlewiseClient
 from .exceptions import CradlewiseApiError, CradlewiseAuthError, CradlewiseError
 from .models import CradlewiseCradle, SleepAnalytics
-from .mqtt import CradlewiseMqtt
 
 __all__ = [
     "AppConfig",
@@ -16,7 +15,6 @@ __all__ = [
     "CradlewiseError",
     "CradlewiseApiError",
     "CradlewiseAuthError",
-    "CradlewiseMqtt",
     "SleepAnalytics",
     "get_app_config",
     "refresh_app_config",

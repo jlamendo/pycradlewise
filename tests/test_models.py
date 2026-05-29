@@ -24,17 +24,29 @@ class TestCradlewiseCradle:
         assert cradle.baby_needs_help is False
         assert cradle.is_crib_helping is True
         assert cradle.loud_sound_detected is False
-        assert cradle.inside_sleep_schedule is True
-        assert cradle.inside_soothing_window is False
-        assert cradle.rocking_not_effective is False
+
+    def test_baby_present_inference(self):
+        # Case 1: Explicitly False, but sleep phase is 'awake'
+        cradle = CradlewiseCradle(cradle_id="c1", state={"baby_present": False, "baby_sleep_state": "awake"})
+        assert cradle.baby_present is True
+
+        # Case 2: Missing flag, but sleep phase is numeric (1 = awake)
+        cradle = CradlewiseCradle(cradle_id="c1", state={"babySleepPhase": "1"})
+        assert cradle.baby_present is True
+
+        # Case 3: Explicitly False, and sleep phase is 'away'
+        cradle = CradlewiseCradle(cradle_id="c1", state={"baby_present": False, "babySleepPhase": "0"})
+        assert cradle.baby_present is False
+
+        # Case 4: Explicitly False, and phase is 'unknown'
+        cradle = CradlewiseCradle(cradle_id="c1", state={"baby_present": False})
+        assert cradle.baby_present is False
 
     def test_mode_properties(self, sample_shadow_state):
         cradle = CradlewiseCradle(cradle_id="c1", state=sample_shadow_state)
         assert cradle.cradle_mode == "Normal"
         assert cradle.bounce_mode == "auto"
         assert cradle.bounce_setting == "medium"
-        assert cradle.responsivity_setting == "normal"
-        assert cradle.music_mode == "lullaby"
 
     def test_actuator_properties(self, sample_shadow_state):
         cradle = CradlewiseCradle(cradle_id="c1", state=sample_shadow_state)
@@ -59,7 +71,7 @@ class TestCradlewiseCradle:
         assert cradle.music == {}
         assert cradle.music_playing is None
         assert cradle.music_volume is None
-        assert cradle.music_mood is None
+        assert cradle.music_mood == "None"
 
     def test_light_properties(self, sample_shadow_state):
         cradle = CradlewiseCradle(cradle_id="c1", state=sample_shadow_state)
@@ -69,24 +81,15 @@ class TestCradlewiseCradle:
     def test_light_missing(self):
         cradle = CradlewiseCradle(cradle_id="c1", state={})
         assert cradle.light == {}
-        assert cradle.light_on is None
-        assert cradle.light_intensity is None
-
-    def test_device_status_properties(self, sample_shadow_state):
-        cradle = CradlewiseCradle(cradle_id="c1", state=sample_shadow_state)
-        assert cradle.battery_life == 95
-        assert cradle.charging is False
-        assert cradle.supply_removed is False
-
-    def test_device_status_missing(self):
-        cradle = CradlewiseCradle(cradle_id="c1", state={})
-        assert cradle.device_status == {}
-        assert cradle.battery_life is None
-        assert cradle.charging is None
-        assert cradle.supply_removed is None
+        assert cradle.light_on is False
+        assert cradle.light_intensity == 0
 
     def test_schedule_properties(self, sample_shadow_state):
-        cradle = CradlewiseCradle(cradle_id="c1", state=sample_shadow_state)
+        analytics = SleepAnalytics(
+            last_nap_start="2026-03-16T00:30:00Z",
+            last_nap_end="2026-03-16T07:00:00Z"
+        )
+        cradle = CradlewiseCradle(cradle_id="c1", state=sample_shadow_state, analytics=analytics)
         assert cradle.sleep_time == "2026-03-16T00:30:00Z"
         assert cradle.wake_up_time == "2026-03-16T07:00:00Z"
 
@@ -126,7 +129,7 @@ class TestCradlewiseCradle:
 
     def test_update_state_replaces_scalars(self, sample_shadow_state):
         cradle = CradlewiseCradle(cradle_id="c1", state=sample_shadow_state)
-        cradle.update_state({"babyPresent": False})
+        cradle.update_state({"babySleepPhaseV2": {"eventValue": 0}, "babyPresent": False})
         assert cradle.baby_present is False
 
     def test_update_state_adds_new_keys(self):

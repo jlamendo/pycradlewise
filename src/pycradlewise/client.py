@@ -5,18 +5,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any
 from urllib.parse import quote, urlparse
+from zoneinfo import ZoneInfo
 
 import aiohttp
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 
 from .auth import CradlewiseAuth
-from .const import SLEEP_PHASE_MAP
 from .exceptions import CradlewiseApiError
-from .models import CradlewiseCradle, SleepAnalytics
+from .models import CradlewiseCradle, SleepAnalytics, Nap
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -93,7 +93,6 @@ class CradlewiseClient:
         data = await self._api_request(
             "GET", "/babyProfiles/forEmail", params={"email_id": self._auth.email}
         )
-        # API returns {"user_list": [...]} wrapper
         if isinstance(data, dict) and "user_list" in data:
             return data["user_list"]
         if isinstance(data, list):
@@ -111,19 +110,29 @@ class CradlewiseClient:
             return data
         return []
 
+    async def get_baby_profile(self, baby_id: str | int) -> dict[str, Any]:
+        """Get full baby profile for a specific baby."""
+        return await self._api_request("GET", f"/babyProfiles/{baby_id}")
+
     async def discover_cradles(self) -> dict[str, CradlewiseCradle]:
         """Discover all cradles linked to the account."""
         profiles = await self.get_baby_profiles()
         cradles: dict[str, CradlewiseCradle] = {}
 
-        for profile in profiles:
-            baby_id = profile.get("baby_id") or profile.get("id")
-            baby_name = profile.get("name", "Baby")
-
+        for profile_summary in profiles:
+            baby_id = profile_summary.get("baby_id") or profile_summary.get("id")
             if not baby_id:
                 continue
 
-            # Fetch cradles for this baby
+            day_start_time = None
+            try:
+                full_profile = await self.get_baby_profile(baby_id)
+                day_start_time = full_profile.get("day_start_time")
+                baby_name = full_profile.get("name") or profile_summary.get("name", "Baby")
+            except Exception as err:
+                _LOGGER.debug("Failed to fetch full profile for %s: %s", baby_id, err)
+                baby_name = profile_summary.get("name", "Baby")
+
             cradle_list = await self.get_cradles_for_baby(baby_id)
             for cradle_data in cradle_list:
                 cradle_id = cradle_data.get("cradle_id")
@@ -132,190 +141,251 @@ class CradlewiseClient:
                         cradle_id=cradle_id,
                         baby_id=str(baby_id),
                         baby_name=baby_name,
+                        day_start_time=day_start_time,
                         timezone=cradle_data.get("timezone"),
                     )
 
         self._cradles = cradles
         return cradles
 
-    # ── Cradle state ─────────────────────────────────────────────────────
+    # ── Cradle status & control ──────────────────────────────────────────
 
     async def get_cradle_state(self, cradle_id: str) -> dict[str, Any]:
+        """Get the current state of a specific cradle."""
         return await self._api_request("GET", f"/cradles/{cradle_id}/state")
 
-    async def get_cradle_online_status(self, cradle_id: str) -> dict[str, Any]:
+    async def get_online_status(self, cradle_id: str) -> dict[str, Any]:
+        """Get the current online status of a specific cradle."""
         return await self._api_request("GET", f"/cradles/{cradle_id}/onlineStatus/v2")
 
     async def get_firmware_data(self, cradle_id: str) -> dict[str, Any]:
+        """Get firmware information for a cradle."""
         return await self._api_request("GET", f"/cradles/{cradle_id}/firmwareData")
 
     async def update_cradle(self, cradle: CradlewiseCradle) -> None:
-        """Fetch and apply the latest state for a cradle."""
+        """Fetch the latest state and online status for a cradle."""
         try:
             state = await self.get_cradle_state(cradle.cradle_id)
-            if isinstance(state, dict):
-                cradle.state = state
-            cradle.online = True
+            cradle.update_state(state)
         except Exception as err:
             _LOGGER.debug("Failed to get state for %s: %s", cradle.cradle_id, err)
-            cradle.online = False
 
         try:
-            online = await self.get_cradle_online_status(cradle.cradle_id)
-            if isinstance(online, dict):
-                cradle.online = online.get("online", cradle.online)
+            status = await self.get_online_status(cradle.cradle_id)
+            if "state_message" in status:
+                msg = json.loads(status["state_message"])
+                cradle.online = msg.get("state", {}).get("state") == 1
+            else:
+                cradle.online = status.get("status") == "online"
+        except Exception:
+            cradle.online = True
+
+        try:
+            fw_data = await self.get_firmware_data(cradle.cradle_id)
+            cradle.firmware_version = fw_data.get("version") or fw_data.get("rootfs_version")
         except Exception:
             pass
 
-        try:
-            fw = await self.get_firmware_data(cradle.cradle_id)
-            if isinstance(fw, dict):
-                cradle.firmware_version = fw.get("version") or fw.get(
-                    "firmware_version"
-                )
-        except Exception:
-            pass
+    async def set_cradle_state(self, cradle_id: str, state: dict[str, Any]) -> None:
+        """Update the cradle state via REST API."""
+        await self._api_request("PUT", f"/cradles/{cradle_id}/state", body=state)
 
     # ── Sleep analytics ──────────────────────────────────────────────────
 
-    async def get_sleep_events(self, baby_id: str) -> list[dict[str, Any]]:
-        return await self._api_request("GET", f"/babyProfiles/{baby_id}/eventsV3")
-
-    async def get_analytics(
-        self, baby_id: str, start_hour: int = 0
+    async def get_day_metrics(
+        self, baby_id: str, start_time: str, end_time: str
     ) -> dict[str, Any]:
+        """Get daily sleep metrics."""
         return await self._api_request(
             "GET",
-            f"/babyProfiles/{baby_id}/analyticsV3",
-            params={"start_hour": start_hour},
+            f"/sleep-analytics/{baby_id}/day-metrics",
+            params={"start_time": start_time, "end_time": end_time},
         )
 
-    async def get_status_timeline(
-        self, baby_id: str, cradle_id: str
+    async def get_weekly_metrics(
+        self, baby_id: str, start_time: str, end_time: str
     ) -> dict[str, Any]:
+        """Get weekly sleep metrics aggregates."""
         return await self._api_request(
-            "GET", f"/babyProfiles/{baby_id}/status_timeline_v2/{cradle_id}"
+            "GET",
+            f"/sleep-analytics/{baby_id}/weekly-sleep-metrics",
+            params={"start_time": start_time, "end_time": end_time},
+        )
+
+    async def get_monthly_metrics(
+        self, baby_id: str, start_time: str, end_time: str
+    ) -> dict[str, Any]:
+        """Get monthly sleep metrics aggregates."""
+        return await self._api_request(
+            "GET",
+            f"/sleep-analytics/{baby_id}/monthly-sleep-metrics",
+            params={"start_time": start_time, "end_time": end_time},
+        )
+
+    async def get_sleep_events(
+        self, baby_id: str, params: dict | None = None
+    ) -> list[dict[str, Any]]:
+        """Get recent sleep events."""
+        data = await self._api_request(
+            "GET", f"/babyProfiles/{baby_id}/eventsV3", params=params
+        )
+        if isinstance(data, dict) and "event_list" in data:
+            return data["event_list"]
+        if isinstance(data, list):
+            return data
+        return []
+
+    async def get_status_timeline(
+        self, baby_id: str, cradle_id: str, params: dict | None = None
+    ) -> dict[str, Any]:
+        """Get detailed status timeline for a cradle."""
+        return await self._api_request(
+            "GET", f"/babyProfiles/{baby_id}/status_timeline_v2/{cradle_id}", params=params
         )
 
     async def fetch_sleep_analytics(
         self, cradle: CradlewiseCradle
     ) -> SleepAnalytics:
-        """Fetch and aggregate sleep analytics for a cradle's baby."""
+        """Fetch raw sleep analytics for a cradle's baby."""
         analytics = SleepAnalytics()
         baby_id = cradle.baby_id
         if not baby_id:
             return analytics
 
-        try:
-            events_data = await self.get_sleep_events(baby_id)
-            if isinstance(events_data, list):
-                analytics.events = events_data
-                _process_events(analytics, events_data)
-        except Exception as err:
-            _LOGGER.debug("Failed to fetch events for %s: %s", baby_id, err)
+        analytics.day_start_time = cradle.day_start_time
 
         try:
-            metrics = await self.get_analytics(baby_id)
-            if isinstance(metrics, dict):
-                _process_analytics_response(analytics, metrics)
+            try:
+                tz = ZoneInfo(cradle.timezone or "UTC")
+            except Exception:
+                tz = timezone.utc
+
+            try:
+                sh, sm = map(int, (cradle.day_start_time or "09:00").split(":"))
+            except (ValueError, TypeError):
+                sh, sm = 9, 0
+
+            now_local = datetime.now(tz)
+            boundary_local = now_local.replace(hour=sh, minute=sm, second=0, microsecond=0)
+
+            end_local = boundary_local + timedelta(days=1)
+            start_local = end_local - timedelta(days=7)
+
+            start_time = start_local.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            end_time = end_local.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+            metrics_data = await self.get_day_metrics(baby_id, start_time, end_time)
+            if isinstance(metrics_data, dict) and "metrics" in metrics_data:
+                if metrics_data["metrics"]:
+                    latest_metrics = metrics_data["metrics"][-1]
+                    _process_day_metrics(analytics, latest_metrics)
         except Exception as err:
-            _LOGGER.debug("Failed to fetch analytics for %s: %s", baby_id, err)
+            _LOGGER.debug("Failed to fetch day metrics for %s: %s", baby_id, err)
+
+        try:
+            week_data = await self.get_weekly_metrics(baby_id, start_time, end_time)
+            if isinstance(week_data, dict):
+                _process_weekly_metrics(analytics, week_data)
+        except Exception as err:
+            _LOGGER.debug("Failed to fetch weekly metrics for %s: %s", baby_id, err)
+
+        try:
+            _LOGGER.debug("Fetching timeline for baby %s and cradle %s", baby_id, cradle.cradle_id)
+            timeline_data = await self.get_status_timeline(baby_id, cradle.cradle_id, params={"limit": 10})
+            if isinstance(timeline_data, dict) and "status_list" in timeline_data:
+                events = timeline_data["status_list"]
+                if events:
+                    latest = events[0]
+                    ts = latest.get("event_time")
+                    if ts:
+                        try:
+                            dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+                            analytics.last_event_time = dt.isoformat().replace("+00:00", "Z")
+                        except (ValueError, TypeError, OSError):
+                            analytics.last_event_time = str(ts)
+                    analytics.last_event_value = latest.get("message") or "Status updated"
+                    if analytics.last_event_value and "<>" in analytics.last_event_value:
+                        analytics.last_event_value = analytics.last_event_value.replace("<>", cradle.baby_name or "Baby")
+                else:
+                    analytics.last_event_value = "No recent events"
+            else:
+                analytics.last_event_value = "Status unavailable"
+        except Exception as err:
+            analytics.last_event_value = "Error fetching status"
+            _LOGGER.warning("Failed to fetch timeline for %s: %s", baby_id, err)
 
         self._analytics[baby_id] = analytics
         return analytics
 
-    def get_cached_analytics(self, baby_id: str) -> SleepAnalytics | None:
-        return self._analytics.get(baby_id)
 
-
-# ── Helpers (module-level) ───────────────────────────────────────────────
-
-
-def _process_events(
-    analytics: SleepAnalytics, events: list[dict[str, Any]]
-) -> None:
-    """Process sleep event list into analytics."""
-    if not events:
-        return
-
-    sleep_minutes = 0
-    soothe_count = 0
-    naps: list[dict[str, str]] = []
-    current_nap_start: str | None = None
-
-    for event in events:
-        event_time = event.get("event_time", "")
-        event_value = str(event.get("event_value", ""))
-        phase = (
-            SLEEP_PHASE_MAP.get(int(event_value), "unknown")
-            if event_value.isdigit()
-            else "unknown"
-        )
-
-        if phase == "sleep" and current_nap_start is None:
-            current_nap_start = event_time
-        elif phase in ("awake", "away") and current_nap_start is not None:
-            naps.append({"start": current_nap_start, "end": event_time})
-            current_nap_start = None
-
-        if phase == "sleep":
-            sc = event.get("soothe_count")
-            if sc is not None:
-                try:
-                    soothe_count += int(sc)
-                except (ValueError, TypeError):
-                    pass
-
-    if current_nap_start is not None:
-        naps.append({"start": current_nap_start, "end": ""})
-
-    analytics.nap_count = len(naps)
-
-    for nap in naps:
-        try:
-            start = datetime.fromisoformat(nap["start"].replace("Z", "+00:00"))
-            end = (
-                datetime.fromisoformat(nap["end"].replace("Z", "+00:00"))
-                if nap["end"]
-                else datetime.now(timezone.utc)
-            )
-            duration = int((end - start).total_seconds() / 60)
-            sleep_minutes += duration
-            if duration > analytics.longest_nap_minutes:
-                analytics.longest_nap_minutes = duration
-        except (ValueError, TypeError):
-            continue
-
-    analytics.total_sleep_minutes = sleep_minutes
-    analytics.total_soothe_count = soothe_count
-
-    if naps:
-        analytics.last_nap_start = naps[-1]["start"]
-        analytics.last_nap_end = naps[-1]["end"] or None
-
-    if events:
-        last = events[-1]
-        analytics.last_event_time = last.get("event_time")
-        raw_val = last.get("event_value")
-        if raw_val is not None and str(raw_val).isdigit():
-            analytics.last_event_value = SLEEP_PHASE_MAP.get(
-                int(raw_val), str(raw_val)
-            )
-        else:
-            analytics.last_event_value = str(raw_val) if raw_val else None
-
-
-def _process_analytics_response(
+def _process_day_metrics(
     analytics: SleepAnalytics, data: dict[str, Any]
 ) -> None:
-    """Merge server-side analytics data."""
-    for key, attr in (
-        ("total_sleep", "total_sleep_minutes"),
-        ("total_awake", "total_awake_minutes"),
-        ("soothe_count", "total_soothe_count"),
-    ):
-        if key in data:
-            try:
-                setattr(analytics, attr, int(data[key]))
-            except (ValueError, TypeError):
-                pass
+    """Map raw day-metrics response to the model."""
+    banners = data.get("banners", [])
+    for banner in banners:
+        b_type = banner.get("type")
+        header = banner.get("header", "")
+        b_data = banner.get("data", {})
+
+        if b_type == "soothes":
+            analytics.total_soothe_count = int(b_data.get("value", 0))
+            analytics.sleep_saved = banner.get("subtext")
+        elif b_type == "naps":
+            analytics.nap_count = int(b_data.get("value", 0))
+            for nap_data in b_data.get("naps", []):
+                analytics.naps.append(
+                    Nap(
+                        title=nap_data.get("title"),
+                        start_time=nap_data.get("start_time"),
+                        end_time=nap_data.get("end_time"),
+                        duration=nap_data.get("duration"),
+                    )
+                )
+            if analytics.naps:
+                latest_nap = analytics.naps[-1]
+                analytics.last_nap_start = latest_nap.start_time
+                analytics.last_nap_end = latest_nap.end_time
+        elif b_type == "info":
+            if header == "RISE TIME":
+                analytics.rise_time = b_data.get("display_value")
+            elif header == "BEDTIME":
+                analytics.bed_time = b_data.get("display_value")
+            elif header == "TIME IN BED":
+                analytics.time_in_bed = b_data.get("display_value")
+            elif header == "LONGEST STRETCH":
+                analytics.longest_stretch = b_data.get("display_value")
+            elif header == "AWAKE IN BED":
+                analytics.awake_in_bed = b_data.get("display_value")
+
+
+def _process_weekly_metrics(
+    analytics: SleepAnalytics, data: dict[str, Any]
+) -> None:
+    """Map raw weekly metrics response to the model."""
+    gm = data.get("sleep_graph_metrics", {})
+    analytics.baby_age_text = gm.get("age_banner_text")
+
+    def _mins_to_display(mins: float | None) -> str | None:
+        if mins is None:
+            return None
+        h = int(mins // 60)
+        m = int(mins % 60)
+        if h > 0:
+            return f"{h}h {m}m"
+        return f"{m}m"
+
+    analytics.weekly_avg_sleep = _mins_to_display(gm.get("avg_sleep_in_mins"))
+    analytics.weekly_avg_day_sleep = _mins_to_display(gm.get("avg_day_sleep_in_mins"))
+    analytics.weekly_avg_night_sleep = _mins_to_display(gm.get("avg_night_sleep_in_mins"))
+
+    nm = data.get("nap_planner_metrics", {})
+    analytics.weekly_avg_nap_duration = _mins_to_display(nm.get("avg_nap_duration_in_mins"))
+    analytics.weekly_avg_naps_per_day = nm.get("avg_naps_per_day")
+
+    rm = data.get("rise_and_bed_time_metrics", {})
+    analytics.weekly_avg_rise_time = rm.get("avg_rise_time")
+    analytics.weekly_avg_bed_time = rm.get("avg_bed_time")
+
+    lm = data.get("longest_stretch_metrics", {})
+    analytics.weekly_avg_longest_stretch = lm.get("avg_longest_stretch_display_text")
