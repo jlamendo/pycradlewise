@@ -228,26 +228,26 @@ class CradlewiseCradle:
 
     @property
     def sleep_phase_name(self) -> str:
-        """Human-readable coarse sleep phase (away, awake, stirring, sleep)."""
+        """Human-readable coarse sleep phase (Away, Awake, Stirring, Sleep)."""
         raw = self.sleep_phase_raw
         if raw is not None:
-            return SLEEP_PHASE_MAP.get(raw, f"unknown ({raw})")
+            return SLEEP_PHASE_MAP.get(raw, f"unknown ({raw})").replace("_", " ").title()
 
         val = self.state.get("baby_sleep_state") or self.state.get("babySleepState") or self.state.get("babySleepPhase")
         if val is not None:
             if isinstance(val, int):
-                return SLEEP_PHASE_MAP.get(val, f"unknown ({val})")
+                return SLEEP_PHASE_MAP.get(val, f"unknown ({val})").replace("_", " ").title()
             sleep_state = str(val).lower()
             if "unknown" in sleep_state:
-                return "unknown"
+                return "Unknown"
             if "sleep" in sleep_state:
-                return "sleep"
+                return "Sleep"
             if "stirring" in sleep_state:
-                return "stirring"
+                return "Stirring"
             if "away" in sleep_state:
-                return "away"
-            return "awake"
-        return "unknown"
+                return "Away"
+            return "Awake"
+        return "Unknown"
 
     @property
     def sleep_stage_name(self) -> str:

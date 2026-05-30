@@ -108,16 +108,16 @@ class TestCradlewiseCradle:
     def test_sleep_phase_raw_non_numeric(self):
         cradle = CradlewiseCradle(cradle_id="c1", state={"babySleepPhase": "unknown"})
         assert cradle.sleep_phase_raw is None
-        assert cradle.sleep_phase_name == "unknown"
+        assert cradle.sleep_phase_name == "Unknown"
 
     def test_sleep_phase_name_mapped(self):
-        for val, expected in [(0, "away"), (1, "awake"), (2, "stirring"), (4, "sleep")]:
+        for val, expected in [(0, "Away"), (1, "Awake"), (2, "Stirring"), (4, "Sleep")]:
             cradle = CradlewiseCradle(cradle_id="c1", state={"babySleepPhaseV2": {"eventValue": val}})
             assert cradle.sleep_phase_name == expected
 
     def test_sleep_phase_name_unknown_int(self):
         cradle = CradlewiseCradle(cradle_id="c1", state={"babySleepPhaseV2": {"eventValue": 99}})
-        assert cradle.sleep_phase_name == "unknown (99)"
+        assert cradle.sleep_phase_name == "Unknown (99)"
 
     def test_update_state_merges_dicts(self, sample_shadow_state):
         cradle = CradlewiseCradle(cradle_id="c1", state=sample_shadow_state)
