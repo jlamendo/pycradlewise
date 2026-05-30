@@ -309,6 +309,18 @@ class CradlewiseCradle:
         val = self.state.get("keepMusicOnDuringSleepLevel")
         return int(val) if val is not None else None
 
+    @property
+    def inside_sleep_schedule(self) -> bool:
+        return bool(self.state.get("inside_sleep_schedule", self.state.get("insideSleepSchedule", False)))
+
+    @property
+    def inside_soothing_window(self) -> bool:
+        return bool(self.state.get("inside_soothing_window", self.state.get("insideSoothingWindow", False)))
+
+    @property
+    def rocking_not_effective(self) -> bool:
+        return bool(self.state.get("rocking_not_effective", self.state.get("rockingNotEffective", False)))
+
     def update_state(self, new_state: dict[str, Any]) -> None:
         """Merge partial state update (from MQTT delta)."""
         for key, value in new_state.items():

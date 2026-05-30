@@ -146,6 +146,25 @@ class TestCradlewiseCradle:
         cradle = CradlewiseCradle(cradle_id="c1", state={"music": {"volume": 8.0}})
         assert cradle.music_volume == 8
 
+    def test_schedule_window_and_effectiveness(self, sample_shadow_state):
+        cradle = CradlewiseCradle(cradle_id="c1", state=sample_shadow_state)
+        assert cradle.inside_sleep_schedule is True
+        assert cradle.inside_soothing_window is False
+        assert cradle.rocking_not_effective is False
+
+        # Test snake_case fallback
+        cradle_snake = CradlewiseCradle(
+            cradle_id="c1",
+            state={
+                "inside_sleep_schedule": False,
+                "inside_soothing_window": True,
+                "rocking_not_effective": True,
+            }
+        )
+        assert cradle_snake.inside_sleep_schedule is False
+        assert cradle_snake.inside_soothing_window is True
+        assert cradle_snake.rocking_not_effective is True
+
 
 class TestSleepAnalytics:
     """Tests for the SleepAnalytics dataclass."""
