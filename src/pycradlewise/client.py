@@ -193,10 +193,6 @@ class CradlewiseClient:
         except Exception:
             pass
 
-    async def set_cradle_state(self, cradle_id: str, state: dict[str, Any]) -> None:
-        """Update the cradle state via REST API."""
-        await self._api_request("PUT", f"/cradles/{cradle_id}/state", body=state)
-
     # ── Sleep analytics ──────────────────────────────────────────────────
 
     async def get_day_metrics(
