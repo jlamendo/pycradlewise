@@ -106,7 +106,6 @@ asyncio.run(run())
 | `baby_present` | `bool` | Baby detected in crib |
 | `sleep_phase_name` | `str` | Coarse sleep phase name (Away, Awake, Stirring, Sleep, Unknown) |
 | `sleep_stage_name` | `str` | Granular sleep stage name (Deep Sleep, Light Sleep, Quiet Awake, etc.) |
-| `baby_needs_attention`| `bool` | True if baby needs attention |
 | `is_crib_helping` | `bool` | True if the crib is soothing (bouncing or running recipe) |
 | `bouncing` | `bool?` | True if rocking motor is active |
 | `bounce_amplitude` | `int?` | Rocking intensity amplitude |

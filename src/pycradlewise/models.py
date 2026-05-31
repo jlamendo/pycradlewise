@@ -16,7 +16,6 @@ class CradlewiseCradle:
     baby_id: str | None = None
     baby_name: str | None = None
     day_start_time: str | None = None
-    rise_time: str | None = None
     firmware_version: str | None = None
     timezone: str | None = None
     serial_number: str | None = None
@@ -48,14 +47,6 @@ class CradlewiseCradle:
         return self.state.get("babySleepPhase")
 
     @property
-    def baby_needs_attention(self) -> bool:
-        return bool(self.state.get("baby_needs_attention", self.state.get("babyNeedsAttention", False)))
-
-    @property
-    def baby_needs_help(self) -> bool:
-        return bool(self.state.get("baby_needs_help", self.state.get("babyNeedsHelp", False)))
-
-    @property
     def is_crib_helping(self) -> bool:
         """Return True if the crib is currently soothing."""
         # Primary indicator: motor is active
@@ -66,10 +57,6 @@ class CradlewiseCradle:
             return True
         # Fallback
         return bool(self.state.get("isCribHelping", False))
-
-    @property
-    def loud_sound_detected(self) -> bool:
-        return bool(self.state.get("loud_sound_detected", self.state.get("loudSoundDetected", False)))
 
     @property
     def cradle_mode(self) -> str | None:
@@ -172,10 +159,6 @@ class CradlewiseCradle:
         return int(val) if val is not None else None
 
     @property
-    def music_mood(self) -> str:
-        return self.music.get("mood") or "None"
-
-    @property
     def music_track(self) -> str:
         """Current track name from soundSynth."""
         return self.sound_synth.get("trackName") or "None"
@@ -197,20 +180,6 @@ class CradlewiseCradle:
     def temperature(self) -> float | None:
         """Room temperature in Celsius."""
         return self.state.get("ambientTempInCelsius")
-
-    @property
-    def sleep_time(self) -> str | None:
-        """Return the start time of the most recent sleep session."""
-        if self.analytics and self.analytics.last_nap_start:
-            return self.analytics.last_nap_start
-        return None
-
-    @property
-    def wake_up_time(self) -> str | None:
-        """Return the end time of the most recent sleep session (if not currently sleeping)."""
-        if self.analytics and self.analytics.last_nap_end:
-            return self.analytics.last_nap_end
-        return None
 
     @property
     def sleep_phase_raw(self) -> int | None:

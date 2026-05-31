@@ -143,6 +143,7 @@ class CradlewiseClient:
                         baby_name=baby_name,
                         day_start_time=day_start_time,
                         timezone=cradle_data.get("timezone"),
+                        serial_number=cradle_data.get("serial_no") or cradle_data.get("serialNumber") or cradle_data.get("serial_number"),
                     )
 
         self._cradles = cradles
@@ -183,6 +184,12 @@ class CradlewiseClient:
         try:
             fw_data = await self.get_firmware_data(cradle.cradle_id)
             cradle.firmware_version = fw_data.get("version") or fw_data.get("rootfs_version")
+            if not cradle.serial_number:
+                cradle.serial_number = (
+                    fw_data.get("serial_no")
+                    or fw_data.get("serialNumber")
+                    or fw_data.get("serial_number")
+                )
         except Exception:
             pass
 
