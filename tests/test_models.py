@@ -100,6 +100,12 @@ class TestCradlewiseCradle:
             cradle = CradlewiseCradle(cradle_id="c1", state={"babySleepPhaseV2": {"eventValue": val}})
             assert cradle.sleep_phase_name == expected
 
+    def test_sleep_phase_name_prioritization(self):
+        # babySleepPhase is 4 (sleep) but babySleepState is 1 (awake).
+        # Since we prioritize babySleepState (1), it should return "Awake" based on SLEEP_PHASE_MAP.
+        cradle = CradlewiseCradle(cradle_id="c1", state={"babySleepPhase": 4, "babySleepState": 1})
+        assert cradle.sleep_phase_name == "Awake"
+
     def test_sleep_phase_name_unknown_int(self):
         cradle = CradlewiseCradle(cradle_id="c1", state={"babySleepPhaseV2": {"eventValue": 99}})
         assert cradle.sleep_phase_name == "Unknown (99)"
@@ -114,7 +120,7 @@ class TestCradlewiseCradle:
 
     def test_update_state_replaces_scalars(self, sample_shadow_state):
         cradle = CradlewiseCradle(cradle_id="c1", state=sample_shadow_state)
-        cradle.update_state({"babySleepPhaseV2": {"eventValue": 0}, "babyPresent": False})
+        cradle.update_state({"babySleepPhaseV2": {"eventValue": 0}, "babyPresent": False, "babySleepState": "not_present"})
         assert cradle.baby_present is False
 
     def test_update_state_adds_new_keys(self):

@@ -198,24 +198,43 @@ class CradlewiseCradle:
     @property
     def sleep_phase_name(self) -> str:
         """Human-readable coarse sleep phase (Away, Awake, Stirring, Sleep)."""
-        raw = self.sleep_phase_raw
-        if raw is not None:
-            return SLEEP_PHASE_MAP.get(raw, f"unknown ({raw})").replace("_", " ").title()
-
-        val = self.state.get("baby_sleep_state") or self.state.get("babySleepState") or self.state.get("babySleepPhase")
+        # 1. Prioritize granular real-time status
+        val = self.state.get("baby_sleep_state") or self.state.get("babySleepState")
         if val is not None:
             if isinstance(val, int):
                 return SLEEP_PHASE_MAP.get(val, f"unknown ({val})").replace("_", " ").title()
             sleep_state = str(val).lower()
             if "unknown" in sleep_state:
                 return "Unknown"
+            if "not_present" in sleep_state or "away" in sleep_state:
+                return "Away"
             if "sleep" in sleep_state:
                 return "Sleep"
             if "stirring" in sleep_state:
                 return "Stirring"
-            if "away" in sleep_state:
-                return "Away"
             return "Awake"
+
+        # 2. Fall back to coarse sleep phase raw
+        raw = self.sleep_phase_raw
+        if raw is not None:
+            return SLEEP_PHASE_MAP.get(raw, f"unknown ({raw})").replace("_", " ").title()
+
+        # 3. Fall back to babySleepPhase representation
+        val_fallback = self.state.get("babySleepPhase")
+        if val_fallback is not None:
+            if isinstance(val_fallback, int):
+                return SLEEP_PHASE_MAP.get(val_fallback, f"unknown ({val_fallback})").replace("_", " ").title()
+            sleep_state = str(val_fallback).lower()
+            if "unknown" in sleep_state:
+                return "Unknown"
+            if "not_present" in sleep_state or "away" in sleep_state:
+                return "Away"
+            if "sleep" in sleep_state:
+                return "Sleep"
+            if "stirring" in sleep_state:
+                return "Stirring"
+            return "Awake"
+
         return "Unknown"
 
     @property
