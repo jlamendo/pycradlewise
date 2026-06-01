@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone, timedelta
 import logging
 from dataclasses import dataclass
 
@@ -44,6 +45,7 @@ class CradlewiseAuth:
         self._password = password
         self._config = app_config
         self._credentials: CradlewiseCredentials | None = None
+        self._last_id_token: str | None = None
 
     @property
     def email(self) -> str:
@@ -62,6 +64,7 @@ class CradlewiseAuth:
         try:
             cognito = await asyncio.to_thread(self._cognito_auth)
             aws_creds = await asyncio.to_thread(self._exchange_for_iam, cognito)
+            self._last_id_token = cognito.id_token
             self._credentials = CradlewiseCredentials(cognito=cognito, aws=aws_creds)
             return self._credentials
         except Exception as err:
@@ -74,9 +77,21 @@ class CradlewiseAuth:
 
         try:
             await asyncio.to_thread(self._credentials.cognito.check_token)
+
+            # Check if cached IAM credentials are still valid and ID token didn't change
+            now = datetime.now(timezone.utc)
+            expiry = getattr(self._credentials.aws, "expiry", None)
+            if (
+                self._last_id_token == self._credentials.cognito.id_token
+                and expiry is not None
+                and now < expiry - timedelta(minutes=5)
+            ):
+                return self._credentials
+
             aws_creds = await asyncio.to_thread(
                 self._exchange_for_iam, self._credentials.cognito
             )
+            self._last_id_token = self._credentials.cognito.id_token
             self._credentials = CradlewiseCredentials(
                 cognito=self._credentials.cognito, aws=aws_creds
             )
@@ -114,8 +129,11 @@ class CradlewiseAuth:
         )
 
         creds = credentials_response["Credentials"]
-        return Credentials(
+        aws_creds = Credentials(
             access_key=creds["AccessKeyId"],
             secret_key=creds["SecretKey"],
             token=creds["SessionToken"],
         )
+        aws_creds.expiry = creds["Expiration"]
+        return aws_creds
+

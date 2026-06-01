@@ -36,16 +36,6 @@ class TestCradlewiseAuth:
         mock_cognito = MagicMock()
         mock_cognito.id_token = "fake-id-token"
 
-        mock_creds = {
-            "IdentityId": "us-east-1:fake-identity",
-        }
-        mock_creds_response = {
-            "Credentials": {
-                "AccessKeyId": "AKID",
-                "SecretKey": "SECRET",
-                "SessionToken": "TOKEN",
-            }
-        }
 
         with patch.object(auth, "_cognito_auth", return_value=mock_cognito):
             with patch.object(auth, "_exchange_for_iam") as mock_exchange:
@@ -132,6 +122,7 @@ class TestCradlewiseAuth:
         mock_cognito = MagicMock()
         mock_cognito.id_token = "test-id-token"
 
+        from datetime import datetime, timezone
         mock_client = MagicMock()
         mock_client.get_id.return_value = {"IdentityId": "test-identity"}
         mock_client.get_credentials_for_identity.return_value = {
@@ -139,6 +130,7 @@ class TestCradlewiseAuth:
                 "AccessKeyId": "AK",
                 "SecretKey": "SK",
                 "SessionToken": "ST",
+                "Expiration": datetime.now(timezone.utc),
             }
         }
 
@@ -152,3 +144,51 @@ class TestCradlewiseAuth:
             },
         )
         assert creds.access_key == "AK"
+        assert creds.expiry is not None
+
+    @pytest.mark.asyncio
+    async def test_ensure_valid_caches_credentials(self, app_config):
+        from datetime import datetime, timezone, timedelta
+        auth = CradlewiseAuth("test@example.com", "password", app_config)
+
+        mock_cognito = MagicMock()
+        mock_cognito.id_token = "fake-id-token"
+
+        from botocore.credentials import Credentials
+        mock_creds = Credentials("AKID", "SECRET", "TOKEN")
+        mock_creds.expiry = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+        auth._credentials = CradlewiseCredentials(cognito=mock_cognito, aws=mock_creds)
+        auth._last_id_token = "fake-id-token"
+
+        with patch.object(auth, "_exchange_for_iam") as mock_exchange:
+            result = await auth.ensure_valid()
+            mock_exchange.assert_not_called()
+
+        assert result.access_key == "AKID"
+        assert result is auth._credentials
+
+    @pytest.mark.asyncio
+    async def test_ensure_valid_refreshes_when_expiring(self, app_config):
+        from datetime import datetime, timezone, timedelta
+        auth = CradlewiseAuth("test@example.com", "password", app_config)
+
+        mock_cognito = MagicMock()
+        mock_cognito.id_token = "fake-id-token"
+
+        from botocore.credentials import Credentials
+        mock_creds = Credentials("AKID", "SECRET", "TOKEN")
+        mock_creds.expiry = datetime.now(timezone.utc) + timedelta(minutes=4)
+
+        auth._credentials = CradlewiseCredentials(cognito=mock_cognito, aws=mock_creds)
+        auth._last_id_token = "fake-id-token"
+
+        new_creds = Credentials("AKID2", "SECRET2", "TOKEN2")
+        new_creds.expiry = datetime.now(timezone.utc) + timedelta(minutes=60)
+
+        with patch.object(auth, "_exchange_for_iam", return_value=new_creds) as mock_exchange:
+            result = await auth.ensure_valid()
+            mock_exchange.assert_called_once_with(mock_cognito)
+
+        assert result.access_key == "AKID2"
+

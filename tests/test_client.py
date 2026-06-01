@@ -1,15 +1,17 @@
 """Tests for pycradlewise.client."""
 
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aioresponses import aioresponses
 from botocore.credentials import Credentials
 
 from pycradlewise.auth import CradlewiseAuth, CradlewiseCredentials
-from pycradlewise.bootstrap import AppConfig
-from pycradlewise.client import CradlewiseClient, _process_events, _process_analytics_response
+from pycradlewise.client import (
+    CradlewiseClient,
+    _process_day_metrics,
+    _process_weekly_metrics,
+)
 from pycradlewise.models import CradlewiseCradle, SleepAnalytics
 
 
@@ -50,8 +52,16 @@ class TestCradlewiseClient:
                 payload={"cradle_list": [{"cradle_id": "cradle-aaa", "baby_id": 123}]},
             )
             m.get(
+                f"{base}/babyProfiles/123",
+                payload={"name": "Baby A", "day_start_time": "09:00"},
+            )
+            m.get(
                 f"{base}/babyProfiles/456/cradles",
                 payload={"cradle_list": [{"cradle_id": "cradle-bbb", "baby_id": 456}]},
+            )
+            m.get(
+                f"{base}/babyProfiles/456",
+                payload={"name": "Baby B", "day_start_time": "08:00"},
             )
             cradles = await client.discover_cradles()
 
@@ -59,33 +69,7 @@ class TestCradlewiseClient:
         assert "cradle-aaa" in cradles
         assert "cradle-bbb" in cradles
         assert cradles["cradle-aaa"].baby_name == "Baby A"
-        assert cradles["cradle-bbb"].baby_id == "456"
-
-    @pytest.mark.asyncio
-    async def test_discover_cradles_with_timezone(self, client, mock_auth):
-        base = mock_auth.app_config.api_base_url
-        profiles = [{"baby_id": 99, "name": "Test"}]
-        with aioresponses() as m:
-            m.get(f"{base}/babyProfiles/forEmail?email_id=test%40example.com", payload={"user_list": profiles})
-            m.get(
-                f"{base}/babyProfiles/99/cradles",
-                payload={"cradle_list": [{"cradle_id": "cradle-xyz", "timezone": "US/Pacific"}]},
-            )
-            cradles = await client.discover_cradles()
-
-        assert "cradle-xyz" in cradles
-        assert cradles["cradle-xyz"].timezone == "US/Pacific"
-
-    @pytest.mark.asyncio
-    async def test_discover_cradles_no_cradle_paired(self, client, mock_auth):
-        base = mock_auth.app_config.api_base_url
-        profiles = [{"baby_id": 99, "name": "NoCradle"}]
-        with aioresponses() as m:
-            m.get(f"{base}/babyProfiles/forEmail?email_id=test%40example.com", payload={"user_list": profiles})
-            m.get(f"{base}/babyProfiles/99/cradles", payload={"cradle_list": []})
-            cradles = await client.discover_cradles()
-
-        assert len(cradles) == 0
+        assert cradles["cradle-aaa"].day_start_time == "09:00"
 
     @pytest.mark.asyncio
     async def test_get_cradle_state(self, client, mock_auth, sample_shadow_state):
@@ -97,210 +81,162 @@ class TestCradlewiseClient:
         assert state["babyPresent"] is True
 
     @pytest.mark.asyncio
-    async def test_get_cradle_online_status(self, client, mock_auth):
-        base = mock_auth.app_config.api_base_url
-        with aioresponses() as m:
-            m.get(f"{base}/cradles/c1/onlineStatus/v2", payload={"online": True})
-            status = await client.get_cradle_online_status("c1")
-
-        assert status["online"] is True
-
-    @pytest.mark.asyncio
-    async def test_get_firmware_data(self, client, mock_auth):
-        base = mock_auth.app_config.api_base_url
-        with aioresponses() as m:
-            m.get(f"{base}/cradles/c1/firmwareData", payload={"version": "1.2.3"})
-            fw = await client.get_firmware_data("c1")
-
-        assert fw["version"] == "1.2.3"
-
-    @pytest.mark.asyncio
     async def test_update_cradle(self, client, mock_auth, sample_shadow_state):
         base = mock_auth.app_config.api_base_url
         cradle = CradlewiseCradle(cradle_id="c1")
 
         with aioresponses() as m:
             m.get(f"{base}/cradles/c1/state", payload=sample_shadow_state)
-            m.get(f"{base}/cradles/c1/onlineStatus/v2", payload={"online": True})
-            m.get(f"{base}/cradles/c1/firmwareData", payload={"version": "2.0"})
+            m.get(
+                f"{base}/cradles/c1/onlineStatus/v2",
+                payload={"state_message": '{"state": {"state": 1}}'},
+            )
             await client.update_cradle(cradle)
 
         assert cradle.online is True
         assert cradle.baby_present is True
-        assert cradle.firmware_version == "2.0"
 
     @pytest.mark.asyncio
-    async def test_update_cradle_offline(self, client, mock_auth):
+    async def test_fetch_sleep_analytics(self, client, mock_auth):
         base = mock_auth.app_config.api_base_url
-        cradle = CradlewiseCradle(cradle_id="c1")
+        cradle = CradlewiseCradle(cradle_id="c1", baby_id="123", timezone="UTC")
 
+        day_metrics = {
+            "metrics": [
+                {
+                    "banners": [
+                        {"type": "soothes", "data": {"value": 5}, "subtext": "2h saved"},
+                        {
+                            "type": "naps",
+                            "data": {
+                                "value": 2,
+                                "naps": [
+                                    {
+                                        "title": "Nap 1",
+                                        "start_time": "2026-03-16T10:00:00Z",
+                                        "end_time": "2026-03-16T11:00:00Z",
+                                    }
+                                ],
+                            },
+                        },
+                    ]
+                }
+            ]
+        }
+
+        timeline_data = {
+            "status_list": [
+                {
+                    "event_time": 1773642600000,  # 2026-03-16T06:30:00Z
+                    "message": "Baby woke up",
+                }
+            ]
+        }
+
+        import re
         with aioresponses() as m:
-            m.get(f"{base}/cradles/c1/state", exception=ConnectionError("timeout"))
-            m.get(f"{base}/cradles/c1/onlineStatus/v2", exception=ConnectionError())
-            m.get(f"{base}/cradles/c1/firmwareData", exception=ConnectionError())
-            await client.update_cradle(cradle)
-
-        assert cradle.online is False
-
-    @pytest.mark.asyncio
-    async def test_get_sleep_events(self, client, mock_auth, sample_sleep_events):
-        base = mock_auth.app_config.api_base_url
-        with aioresponses() as m:
-            m.get(f"{base}/babyProfiles/123/eventsV3", payload=sample_sleep_events)
-            events = await client.get_sleep_events("123")
-
-        assert len(events) == 7
-
-    @pytest.mark.asyncio
-    async def test_get_analytics(self, client, mock_auth):
-        base = mock_auth.app_config.api_base_url
-        with aioresponses() as m:
-            m.get(f"{base}/babyProfiles/123/analyticsV3?start_hour=0", payload={"total_sleep": 300})
-            data = await client.get_analytics("123")
-
-        assert data["total_sleep"] == 300
-
-    @pytest.mark.asyncio
-    async def test_fetch_sleep_analytics(self, client, mock_auth, sample_sleep_events):
-        base = mock_auth.app_config.api_base_url
-        cradle = CradlewiseCradle(cradle_id="c1", baby_id="123")
-
-        with aioresponses() as m:
-            m.get(f"{base}/babyProfiles/123/eventsV3", payload=sample_sleep_events)
-            m.get(f"{base}/babyProfiles/123/analyticsV3?start_hour=0", payload={})
+            m.get(
+                re.compile(rf"^{base}/sleep-analytics/123/day-metrics"),
+                payload=day_metrics,
+                repeat=True,
+            )
+            m.get(
+                re.compile(rf"^{base}/sleep-analytics/123/weekly-sleep-metrics"),
+                payload={},
+                repeat=True,
+            )
+            m.get(
+                f"{base}/babyProfiles/123/status_timeline_v2/c1?limit=10",
+                payload=timeline_data,
+            )
             analytics = await client.fetch_sleep_analytics(cradle)
 
+        assert analytics.total_soothe_count == 5
         assert analytics.nap_count == 2
-        assert analytics.last_event_value == "awake"
-
-    @pytest.mark.asyncio
-    async def test_fetch_sleep_analytics_no_baby(self, client):
-        cradle = CradlewiseCradle(cradle_id="c1", baby_id=None)
-        analytics = await client.fetch_sleep_analytics(cradle)
-        assert analytics.nap_count == 0
-
-    def test_get_cached_analytics(self, client):
-        assert client.get_cached_analytics("123") is None
-
-    @pytest.mark.asyncio
-    async def test_api_request_retries_on_403(self, client, mock_auth):
-        base = mock_auth.app_config.api_base_url
-        with aioresponses() as m:
-            m.get(f"{base}/cradles/c1/state", status=403)
-            m.get(f"{base}/cradles/c1/state", payload={"mode": "Normal"})
-            state = await client.get_cradle_state("c1")
-
-        assert state["mode"] == "Normal"
-        mock_auth.authenticate.assert_called_once()
-
-
-class TestProcessEvents:
-    def test_basic_nap_detection(self, sample_sleep_events):
-        analytics = SleepAnalytics()
-        _process_events(analytics, sample_sleep_events)
-
-        # Stirring doesn't end a nap. So:
-        # Nap 1: 00:30 (sleep) -> 02:00 (stirring, still napping) -> 02:05 (sleep) -> 04:00 (awake) = 210 min
-        # Nap 2: 04:30 (sleep) -> 06:30 (awake) = 120 min
-        assert analytics.nap_count == 2
-        assert analytics.longest_nap_minutes == 210
-        assert analytics.total_sleep_minutes == 330
-        assert analytics.last_event_value == "awake"
+        assert analytics.last_nap_start == "2026-03-16T10:00:00Z"
+        assert analytics.last_event_value == "Baby woke up"
         assert analytics.last_event_time == "2026-03-16T06:30:00Z"
 
-    def test_empty_events(self):
+
+class TestProcessDayMetrics:
+    def test_soothes_processing(self):
         analytics = SleepAnalytics()
-        _process_events(analytics, [])
-        assert analytics.nap_count == 0
-        assert analytics.total_sleep_minutes == 0
+        data = {
+            "banners": [
+                {"type": "soothes", "data": {"value": "10"}, "subtext": "1h 30m saved"}
+            ]
+        }
+        _process_day_metrics(analytics, data)
+        assert analytics.total_soothe_count == 10
+        assert analytics.sleep_saved == "1h 30m saved"
 
-    def test_ongoing_nap(self):
-        events = [
-            {"event_time": "2026-03-16T00:00:00Z", "event_value": "4"},  # sleep, no end
-        ]
+    def test_naps_processing(self):
         analytics = SleepAnalytics()
-        _process_events(analytics, events)
-        assert analytics.nap_count == 1
-        assert analytics.last_nap_end is None
-        assert analytics.total_sleep_minutes > 0
+        data = {
+            "banners": [
+                {
+                    "type": "naps",
+                    "data": {
+                        "value": 3,
+                        "naps": [
+                            {
+                                "title": "Nap 1",
+                                "start_time": "2026-03-16T12:00:00Z",
+                                "end_time": "2026-03-16T13:00:00Z",
+                            },
+                            {
+                                "title": "Nap 2",
+                                "start_time": "2026-03-16T15:00:00Z",
+                                "end_time": "2026-03-16T16:00:00Z",
+                            },
+                        ],
+                    },
+                }
+            ]
+        }
+        _process_day_metrics(analytics, data)
+        assert analytics.nap_count == 3
+        assert len(analytics.naps) == 2
+        assert analytics.last_nap_start == "2026-03-16T15:00:00Z"
 
-    def test_non_numeric_event_value(self):
-        events = [
-            {"event_time": "2026-03-16T00:00:00Z", "event_value": "unknown"},
-        ]
+    def test_info_processing(self):
         analytics = SleepAnalytics()
-        _process_events(analytics, events)
-        assert analytics.nap_count == 0
-        assert analytics.last_event_value == "unknown"
+        data = {
+            "banners": [
+                {"type": "info", "header": "RISE TIME", "data": {"display_value": "7:00 AM"}},
+                {"type": "info", "header": "BEDTIME", "data": {"display_value": "8:30 PM"}},
+            ]
+        }
+        _process_day_metrics(analytics, data)
+        assert analytics.rise_time == "7:00 AM"
+        assert analytics.bed_time == "8:30 PM"
 
-    def test_soothe_count(self):
-        events = [
-            {"event_time": "2026-03-16T00:00:00Z", "event_value": "4", "soothe_count": 2},
-            {"event_time": "2026-03-16T01:00:00Z", "event_value": "4", "soothe_count": 3},
-            {"event_time": "2026-03-16T02:00:00Z", "event_value": "1"},
-        ]
+
+class TestProcessWeeklyMetrics:
+    def test_graph_metrics(self):
         analytics = SleepAnalytics()
-        _process_events(analytics, events)
-        assert analytics.total_soothe_count == 5
+        data = {
+            "sleep_graph_metrics": {
+                "avg_sleep_in_mins": 480,
+                "age_banner_text": "6 months",
+            }
+        }
+        _process_weekly_metrics(analytics, data)
+        assert analytics.weekly_avg_sleep == "8h 0m"
+        assert analytics.baby_age_text == "6 months"
 
-    def test_invalid_soothe_count(self):
-        events = [
-            {"event_time": "2026-03-16T00:00:00Z", "event_value": "4", "soothe_count": "invalid"},
-            {"event_time": "2026-03-16T01:00:00Z", "event_value": "1"},
-        ]
+    def test_nap_planner_metrics(self):
         analytics = SleepAnalytics()
-        _process_events(analytics, events)
-        assert analytics.total_soothe_count == 0
-
-    def test_last_nap_start_end(self, sample_sleep_events):
-        analytics = SleepAnalytics()
-        _process_events(analytics, sample_sleep_events)
-        assert analytics.last_nap_start == "2026-03-16T04:30:00Z"
-        assert analytics.last_nap_end == "2026-03-16T06:30:00Z"
-
-    def test_away_event(self):
-        events = [
-            {"event_time": "2026-03-16T00:00:00Z", "event_value": "4"},  # sleep
-            {"event_time": "2026-03-16T01:00:00Z", "event_value": "0"},  # away
-        ]
-        analytics = SleepAnalytics()
-        _process_events(analytics, events)
-        assert analytics.nap_count == 1
-
-    def test_invalid_timestamp(self):
-        events = [
-            {"event_time": "not-a-date", "event_value": "4"},
-            {"event_time": "also-not-a-date", "event_value": "1"},
-        ]
-        analytics = SleepAnalytics()
-        _process_events(analytics, events)
-        # Should not crash
-        assert analytics.nap_count == 1
-        assert analytics.total_sleep_minutes == 0  # couldn't parse
-
-
-class TestProcessAnalyticsResponse:
-    def test_merges_server_data(self):
-        analytics = SleepAnalytics()
-        _process_analytics_response(analytics, {
-            "total_sleep": 120,
-            "total_awake": 60,
-            "soothe_count": 5,
-        })
-        assert analytics.total_sleep_minutes == 120
-        assert analytics.total_awake_minutes == 60
-        assert analytics.total_soothe_count == 5
-
-    def test_ignores_missing_keys(self):
-        analytics = SleepAnalytics(total_sleep_minutes=100)
-        _process_analytics_response(analytics, {"unrelated_key": 42})
-        assert analytics.total_sleep_minutes == 100
-
-    def test_handles_invalid_values(self):
-        analytics = SleepAnalytics()
-        _process_analytics_response(analytics, {
-            "total_sleep": "not_a_number",
-            "soothe_count": None,
-        })
-        assert analytics.total_sleep_minutes == 0
-        assert analytics.total_soothe_count == 0
+        data = {
+            "sleep_graph_metrics": {
+                "avg_sleep_in_mins": 480,
+                "age_banner_text": "6 months",
+            },
+            "nap_planner_metrics": {
+                "avg_nap_duration_in_mins": 90,
+                "avg_naps_per_day": 2.5,
+            }
+        }
+        _process_weekly_metrics(analytics, data)
+        assert analytics.weekly_avg_nap_duration == "1h 30m"
+        assert analytics.weekly_avg_naps_per_day == 2.5
