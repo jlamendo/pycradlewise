@@ -105,7 +105,18 @@ class CradlewiseCradle:
     @property
     def responsivity_level(self) -> str | None:
         """Return human readable responsivity level."""
-        return self.state.get("responsivitySettingVerbose")
+        val = self.responsivity_setting
+        if val is None:
+            return self.state.get("responsivitySettingVerbose")
+        mapping = {
+            0: "Smart",
+            2: "Minimum",
+            4: "Low",
+            6: "Moderate",
+            8: "High",
+            10: "Maximum",
+        }
+        return mapping.get(val, self.state.get("responsivitySettingVerbose"))
 
     @property
     def cry_sensitivity(self) -> int | None:
@@ -115,7 +126,19 @@ class CradlewiseCradle:
     @property
     def cry_sensitivity_level(self) -> str | None:
         """Return human readable cry sensitivity level."""
-        return self.state.get("crySensitivityVerbose")
+        val = self.cry_sensitivity
+        if val is None:
+            return self.state.get("crySensitivityVerbose")
+        mapping = {
+            0: "Minimum",
+            1: "Low",
+            2: "Moderate",
+            3: "Moderate",
+            4: "High",
+            5: "High",
+            6: "Maximum",
+        }
+        return mapping.get(val, self.state.get("crySensitivityVerbose"))
 
     @property
     def music_mode(self) -> str | None:

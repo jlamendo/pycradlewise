@@ -137,6 +137,28 @@ class TestCradlewiseCradle:
         cradle = CradlewiseCradle(cradle_id="c1", state={"music": {"volume": 8.0}})
         assert cradle.music_volume == 8
 
+    def test_sensitivity_mappings(self):
+        cradle = CradlewiseCradle(cradle_id="c1", state={})
+        assert cradle.responsivity_setting is None
+        assert cradle.responsivity_level is None
+        assert cradle.cry_sensitivity is None
+        assert cradle.cry_sensitivity_level is None
+
+        cradle.update_state({"responsivitySetting": 6, "crySensitivity": 2})
+        assert cradle.responsivity_setting == 6
+        assert cradle.responsivity_level == "Moderate"
+        assert cradle.cry_sensitivity == 2
+        assert cradle.cry_sensitivity_level == "Moderate"
+
+        cradle.update_state({
+            "responsivitySetting": 99,
+            "crySensitivity": 99,
+            "responsivitySettingVerbose": "Custom1",
+            "crySensitivityVerbose": "Custom2"
+        })
+        assert cradle.responsivity_level == "Custom1"
+        assert cradle.cry_sensitivity_level == "Custom2"
+
 
 
 
